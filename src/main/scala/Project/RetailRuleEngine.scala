@@ -2,13 +2,15 @@ package Project
 
 import scala.io.{BufferedSource, Source}
 import java.time.format.{DateTimeFormatter, DateTimeParseException}
-import java.time.LocalDate
+import java.time.{LocalDate, LocalDateTime}
 import math.ceil
 import java.sql.{DriverManager, PreparedStatement, SQLException, SQLTimeoutException}
 import java.text.SimpleDateFormat
 import java.io.IOException
 import java.io.FileNotFoundException
 import java.lang.ClassNotFoundException
+import java.io.{File, FileOutputStream, PrintWriter}
+
 
 
 /**
@@ -65,6 +67,36 @@ object RetailRuleEngine extends App {
     private case class ProcessedTransaction(originalTrx: Transaction, discount: Double, totalDue: Double)
 
     /**
+     * Writes a single line to a log using a provided `PrintWriter`. This method encapsulates the basic functionality
+     * of writing text data to logs, making it reusable and maintaining a clean and simple interface for logging
+     * throughout the application.
+     *
+     * <p> This utility method is intended to abstract the direct use of `PrintWriter` and provide a centralized method
+     * for writing log entries, which can be useful for implementing more complex logging behaviors in the future,
+     * such as conditional logging or automated timestamping.
+     *
+     * @param writer The `PrintWriter` object used to write to the log. This writer must be properly initialized
+     *               and opened before being passed to this method.
+     * @param line   The string to be written to the log. This is the actual log message, which could include
+     *               information about application state, errors, or other significant events.
+     * @param level   The string to represent the log level of the line, Warning, Info, Error.
+     * @example Usage:
+     * {{{
+     *          val writer = new PrintWriter(new FileWriter("app.log", true))
+     *          writeLog(writer, "Starting application.")
+     *          writeLog(writer, "Application error: unable to access database.")
+     *          writer.close()
+     *           }}}
+     * @note It's important to manage the `PrintWriter` resource externally, ensuring it's opened before calling this
+     *       method and closed appropriately when all writing is completed to avoid resource leaks.
+     */
+    private def writeLog(writer: PrintWriter, line: String, level: String): Unit = {
+        val logFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+        val logTimestamp: String = LocalDateTime.now().format(logFormatter)
+        writer.write(f"$logTimestamp  $level  $line \n")
+    }
+
+    /**
      * Converts a raw CSV line into a `Transaction` object. This function parses a comma-separated string
      * representing transaction data into the corresponding fields of the `Transaction` case class.
      *
@@ -83,7 +115,8 @@ object RetailRuleEngine extends App {
     private def toTrx(line: String): Transaction = {
         // Specify the line's arguments
         val args = line.split(",")
-        if (args.length == 7)
+        // Assure that we have enough fields to initiate a transaction object
+        if (args.length >= 7)
             // Return a Transaction Object
             Transaction(args(0), args(1), args(2), args(3).toInt, args(4).toDouble, args(5), args(6))
         // Return a dummy transaction representing an invalid line
@@ -140,6 +173,7 @@ object RetailRuleEngine extends App {
      * the database connection is closed after operations are completed.
      *
      * @param trxs A list of `ProcessedTransaction` objects to be inserted into the database.
+     * @param writer A Print Writer object to be used to write log entries.
      * @return An integer representing the status code of the operation, while <br>
      *         * 1: represents a success code. <br>
      *         * -1: represents SQL Exception. <br>
@@ -154,7 +188,8 @@ object RetailRuleEngine extends App {
      * @throws SQException if a database access error occurs or the URL is null.
      * @throws ClassNotFoundException if the Oracle JDBC driver class is not found.
      */
-    private def writeData(trxs: List[ProcessedTransaction]):Int = {
+    private def writeData(trxs: List[ProcessedTransaction], writer: PrintWriter):Int = {
+        writeLog(writer, "Trying to connect to the database ...", "Info")
         // Specify the URL for the Database Server
         val url = "jdbc:oracle:thin:@localhost:1521:XE"
         // Specify the username, password to use to connect to the DB
@@ -168,6 +203,7 @@ object RetailRuleEngine extends App {
             Class.forName("oracle.jdbc.driver.OracleDriver")
             // Connect to the DB => Can throws a SQLTimeoutException or SQLException
             val connection = DriverManager.getConnection(url, username, password)
+            writeLog(writer, "Successfully connected to the database", "Info")
 
             // SQL statement for inserting data
             val sql = """
@@ -179,24 +215,29 @@ object RetailRuleEngine extends App {
             // Prepare statement with the SQL
             val statement: PreparedStatement = connection.prepareStatement(sql)
 
+            writeLog(writer, "Preparing the insert statements...", "Info")
             // Set parameters for the insert statement
-            trxs.foreach(trx => {
-                // Convert the timestamp string to a timestamp object
-                val timestamp = new java.sql.Timestamp(timestampFormat.parse(trx.originalTrx.timestamp).getTime)
-                // Fill the data for each attribute
-                statement.setTimestamp(1, timestamp)
-                statement.setString(2, trx.originalTrx.productName)
-                // Convert the expiry date to a Date Object
-                val expiryDate = new java.sql.Date(dateFormat.parse(trx.originalTrx.expiryDate).getTime)
-                statement.setDate(3, expiryDate)
-                statement.setInt(4, trx.originalTrx.quantity)
-                statement.setDouble(5, trx.originalTrx.unitPrice)
-                statement.setString(6, trx.originalTrx.channel)
-                statement.setString(7, trx.originalTrx.paymentMethod)
-                statement.setDouble(8, trx.discount)
-                statement.setDouble(9, trx.totalDue)
-                // Add the Insert Statement to the Execute batch
-                statement.addBatch()
+            trxs.foreach(trx => try {
+                    // Convert the timestamp string to a timestamp object
+                    val timestamp = new java.sql.Timestamp(timestampFormat.parse(trx.originalTrx.timestamp).getTime)
+                    // Fill the data for each attribute
+                    statement.setTimestamp(1, timestamp)
+                    statement.setString(2, trx.originalTrx.productName)
+                    // Convert the expiry date to a Date Object
+                    val expiryDate = new java.sql.Date(dateFormat.parse(trx.originalTrx.expiryDate).getTime)
+                    statement.setDate(3, expiryDate)
+                    statement.setInt(4, trx.originalTrx.quantity)
+                    statement.setDouble(5, trx.originalTrx.unitPrice)
+                    statement.setString(6, trx.originalTrx.channel)
+                    statement.setString(7, trx.originalTrx.paymentMethod)
+                    statement.setDouble(8, trx.discount)
+                    statement.setDouble(9, trx.totalDue)
+                    // Add the Insert Statement to the Execute batch
+                    statement.addBatch()
+                }
+                catch {
+                    case e: Exception => writeLog(writer, f"Insert statement for ${trx.originalTrx.timestamp} " +
+                                                          f"transaction failed", "Warning")
                 }
             )
 
@@ -209,16 +250,12 @@ object RetailRuleEngine extends App {
             1 // Return the success code
         } catch {
             case e: SQLException =>
-                e.printStackTrace()
                 -1 // return SQL Exception Code
             case e: SQLTimeoutException =>
-                e.printStackTrace()
                 -2 // Return SQLTimeOutException Code
             case e: ClassNotFoundException =>
-                e.printStackTrace()
                 -3 // Return ClassNotFoundExceptionCode
             case e: Exception =>
-                e.printStackTrace()
                 -4 // Return a general error code
         }
     }
@@ -236,6 +273,7 @@ object RetailRuleEngine extends App {
      *
      * @param trx The transaction for which the expiry day-based discount is to be calculated. This transaction
      *            contains the product's expiry date and the sale's timestamp among other details.
+     * @param writer A Print Writer object to be used to write log entries.
      * @return The discount percentage based on expiry days. Returns 0 if more than 29 days remain, otherwise
      *         returns a value that increases as the number of remaining days decreases.
      *
@@ -248,8 +286,9 @@ object RetailRuleEngine extends App {
      * @throws DateTimeParseException if the `timestamp` or `expiryDate` cannot be parsed.
 
      */
-    private def qualifyExpireDay(trx: Transaction) :Int = {
+    private def qualifyExpireDay(trx: Transaction, writer: PrintWriter) :Int = {
         try {
+            writeLog(writer, f"${trx.timestamp}: Qualifying Expiry date.", "Info")
             // Specify the format for the timestamp field and parse it as a LocalDate object
             val formatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssX")
             val sellDate: LocalDate = LocalDate.parse(trx.timestamp, formatter)
@@ -263,7 +302,7 @@ object RetailRuleEngine extends App {
         catch {
             // In case of invalid date format the order will be considered as not qualified for discount
             case e: DateTimeParseException =>
-                println("Invalid Date Format!")
+                writeLog(writer, f"${trx.timestamp}: Invalid date format!.", "Error")
                 0
         }
     }
@@ -279,6 +318,7 @@ object RetailRuleEngine extends App {
      *
      * @param trx The transaction containing the product details. The product name in the transaction is evaluated
      *            to determine the discount.
+     * @param writer A Print Writer object to be used to write log entries.
      * @return The discount rate as an integer percentage. If the product name contains "wine", it returns 5;
      *         if it contains "cheese", it returns 10; otherwise, it returns 0.
      * @example To get the discount for a transaction involving wine:
@@ -287,12 +327,13 @@ object RetailRuleEngine extends App {
      *          val discount = qualifyProduct(transaction)
      *          }}}
      */
-    private def qualifyProduct(trx: Transaction) =
+    private def qualifyProduct(trx: Transaction, writer: PrintWriter) =
         // If the product name contains the ord wine, it is a wine product! Same for Cheese, other wise
         // the product is not qualified for a discount
+        writeLog(writer, f"${trx.timestamp}: Qualifying Product Category.", "Info")
         trx.productName.toLowerCase() match  {
-            case name if name.contains("wine") => 5
-            case name if name.contains("cheese") => 10
+            case name if name.startsWith("wine") => 5
+            case name if name.startsWith("cheese") => 10
             case _ =>  0
         }
 
@@ -305,6 +346,7 @@ object RetailRuleEngine extends App {
      *
      * @param trx The transaction that includes the timestamp when the sale was made. The timestamp is evaluated
      *            to check if the transaction occurred on March 23rd.
+     * @param writer A Print Writer object to be used to write log entries.
      * @return The discount percentage. Returns 50 if the transaction date is March 23rd; otherwise, it returns 0.
      * @example To calculate the discount for a transaction on March 23rd:
      * {{{
@@ -312,8 +354,9 @@ object RetailRuleEngine extends App {
      *          val discount = qualifySale(transaction)
      *           }}}
      */
-    private def qualifySale(trx: Transaction): Int = {
+    private def qualifySale(trx: Transaction, writer: PrintWriter): Int = {
         // Specify the pattern for orders purchased in 23rd of March
+        writeLog(writer, f"${trx.timestamp}: Qualifying Special 23rd of March sale.", "Info")
         val pattern = "^\\d{4}-03-23".r
         // If the pattern matches a 50 % Discount is applied, else it is not qualified for a discount
         if (pattern.findFirstIn(trx.timestamp).isDefined) 50 else 0
@@ -328,6 +371,7 @@ object RetailRuleEngine extends App {
      *
      * @param trx The transaction containing details of the product quantity. This quantity is used to determine
      *            the applicable discount rate.
+     * @param writer A Print Writer object to be used to write log entries.
      * @return The discount rate as an integer percentage based on the quantity. The function returns 10 for quantities
      *         of 15 or more, 7 for 10 to 14, 5 for 6 to 9, and 0 for less than 6.
      * @example To get the discount for a transaction involving 12 units:
@@ -336,7 +380,8 @@ object RetailRuleEngine extends App {
      *          val discount = qualifyQuantity(transaction)
      *           }}}
      */
-    private def qualifyQuantity(trx: Transaction):Int =
+    private def qualifyQuantity(trx: Transaction, writer: PrintWriter):Int =
+        writeLog(writer, f"${trx.timestamp}: Qualifying Quantity.", "Info")
         // Calculate the discount based on the quantity sold of the product
         trx.quantity match {
             case q if q >= 15 => 10
@@ -346,15 +391,101 @@ object RetailRuleEngine extends App {
         }
 
     /**
+     * Calculates a channel-based discount for transactions completed through a specific application channel.
+     * This method determines the discount based on the quantity of items in the transaction, with different
+     * tiers of discounts applied only if the transaction is made via the "App" channel. For transactions
+     * through other channels, no discount is applied.
+     *
+     * <p> The discount calculation is tiered such that every increment of 5 units in quantity increases the
+     * discount by 5%, starting from quantities of 1 (5%), up to the maximum discount based on the available
+     * quantity. For example, quantities 1-5 get a 5% discount, 6-10 get 10%, etc.
+     *
+     * @param trx The `Transaction` object to be evaluated, which contains details such as the channel of the
+     *            transaction and the quantity of items purchased.
+     * @param writer A Print Writer object to be used to write log entries.
+     * @return An integer representing the discount percentage. If the transaction is through the "App" channel,
+     *         returns a discount based on quantity tiers; otherwise, returns 0.
+     * @example Usage:
+     * {{{
+     *          val transaction = Transaction("2023-04-18T18:18:40Z", "Smartphone", "2024-01-01", 7, 300.00, "App", "Credit Card")
+     *          val discount = qualifyChannel(transaction)
+     *          // discount should be 10 as the quantity falls within the 6-10 range
+     *           }}}
+     * @note This method specifically handles transactions made through the "App" channel, ensuring promotional
+     *       discounts are applied to stimulate sales via this platform. For other channels, it enforces no discount policy.
+     */
+    private def qualifyChannel(trx: Transaction, writer: PrintWriter): Int = {
+        writeLog(writer, f"${trx.timestamp}: Qualifying Payment Channel.", "Info")
+        // Map 0-4 to 0, 5-9 to 1, 10-14 to 2, and so on
+        val qualifier: Int = (trx.quantity - 1) / 5
+        // Map 0 to 5, 1 to 10, 2 to 15 and so on (for App Transactions Only).
+        if (trx.channel.equals("App")) (qualifier + 1) * 5 else 0
+    }
+
+    /**
+     * Determines a discount based on the payment method specified in a transaction. This function awards a fixed
+     * discount if the payment method is "Visa"; otherwise, no discount is applied.
+     *
+     * <p> This discount incentive is designed to promote the use of Visa cards, potentially due to partnership agreements
+     * or marketing strategies aimed at encouraging customers to use Visa over other payment methods.
+     *
+     * @param trx The `Transaction` object containing details of the transaction including the payment method.
+     * @param writer A Print Writer object to be used to write log entries.
+     * @return An integer representing the discount percentage. If the payment method is "Visa", returns 5;
+     *         otherwise, returns 0.
+     * @example Usage:
+     * {{{
+     *          val transaction = Transaction("2023-04-18T18:18:40Z", "Laptop", "2024-01-01", 1, 1200.00, "Online", "Visa")
+     *          val discount = qualifyMethod(transaction)
+     *          // discount should be 5 as the payment method is Visa
+     * }}}
+     * @note This method is particularly useful for scenarios where specific promotions are tied to payment methods.
+     *       It can easily be extended to include additional payment methods and corresponding discounts.
+     */
+    private def qualifyMethod(trx: Transaction, writer: PrintWriter) = {
+        writeLog(writer, f"${trx.timestamp}: Qualifying Payment Method.", "Info")
+        if (trx.paymentMethod.equals("Visa")) 5 else 0
+    }
+
+    /**
+     * Determines whether a given transaction qualifies for a discount based on a specified rule.
+     * This method evaluates a transaction using a provided discount rule function. It checks if the
+     * result of applying the rule to the transaction is non-zero, which indicates that the transaction
+     * qualifies for some form of discount under that rule.
+     *
+     * <p> This utility function is a part of a larger decision-making process where different rules
+     * may be applied to determine the applicability of various discounts, promotions, or qualifications
+     * within a retail environment.
+     *
+     * @param rule A function that takes a `Transaction` and returns an `Int`. The function represents
+     *             a discount rule which, when applied to a transaction, yields an integer value indicating
+     *             the discount percentage. A return value of `0` indicates no discount.
+     * @param trx  The `Transaction` to be evaluated by the rule. This object contains all necessary
+     *             details about the transaction such as product name, quantity, and price.
+     * @return `true` if the transaction qualifies for the discount (i.e., the rule function returns
+     *         a non-zero value); `false` otherwise.
+     * @example Usage:
+     * {{{
+     *          val transaction = Transaction("2023-04-18T18:18:40Z", "Cheese", "2023-05-10", 10, 3.50, "Online", "Credit Card")
+     *          val discountRule = qualifyProduct  // assume qualifyProduct is a function defined elsewhere
+     *          val isDiscounted = isQualified(discountRule, transaction)
+     *           }}}
+     * @note This method assumes that all rules are implemented such that a return value of `0` strictly indicates
+     *       no qualification for discounts, and any non-zero value indicates qualification.
+     */
+    private def isQualified(rule: Transaction => Int, trx: Transaction): Boolean = rule(trx) > 0
+
+    /**
      * Aggregates discounts from a list of discount-qualifying functions applied to a given transaction. Each function
      * in the list is called with the transaction as an argument, and the resulting discounts are collected into a list.
      *
      * <p> This method allows for modular addition of discount rules and easy computation of all applicable discounts
      * on a transaction, facilitating the application of multiple discount policies simultaneously.
      *
-     * @param functions A list of functions, each of which takes a `Transaction` object and returns an `Int` representing
+     * @param rules A list of functions, each of which takes a `Transaction` object and returns an `Int` representing
      *                  a discount percentage.
      * @param trx       The transaction to which the discount functions are applied.
+     * @param writer A Print Writer object to be used to write log entries.
      * @return A list of integers, each representing a discount percentage obtained from the corresponding function
      *         in the `functions` list.
      * @example To calculate all discounts for a specific transaction:
@@ -364,7 +495,8 @@ object RetailRuleEngine extends App {
      *          val discounts = getDiscounts(discountFunctions, transaction)
      *           }}}
      */
-    private def getDiscounts(functions: List[Transaction => Int], trx: Transaction): List[Int] = functions.map(_(trx))
+    private def getDiscounts(rules: List[(Transaction, PrintWriter) => Int],
+                             trx: Transaction, writer: PrintWriter): List[Int] = rules.map(_(trx, writer))
 
     /**
      * Normalizes the calculated discounts to ensure a maximum and fair application of multiple discounts. The function
@@ -410,6 +542,7 @@ object RetailRuleEngine extends App {
      * pricing strategies to a single transaction.
      *
      * @param trx The transaction for which the discount is to be calculated.
+     * @param writer A Print Writer object to be used to write log entries.
      * @return A double representing the total discount percentage for the transaction.
      * @example To calculate the total discount for a transaction:
      * {{{
@@ -417,12 +550,15 @@ object RetailRuleEngine extends App {
      *          val totalDiscount = calcDiscount(transaction)
      *           }}}
      */
-    private def calcDiscount(trx: Transaction): Double = {
+    private def calcDiscount(trx: Transaction, writer: PrintWriter): Double = {
+        writeLog(writer, f"Applying the discount rules for ${trx.timestamp}", "Info")
         // Specify the set of rules to apply on a transaction
-        val rules: List[Transaction => Int] = List(qualifyExpireDay, qualifyProduct, qualifySale, qualifyQuantity)
+        val rules: List[(Transaction, PrintWriter) => Int] = List(qualifyExpireDay, qualifyProduct,
+                                                   qualifySale, qualifyQuantity, qualifyChannel, qualifyMethod)
         // Get the discounts corresponding to those rules
-        val discounts :List[Int] = getDiscounts(rules, trx)
+        val discounts :List[Int] = getDiscounts(rules, trx, writer)
         // Normalize the value to the final discount
+        writeLog(writer, f"Getting the deserved discount for ${trx.timestamp}", "Info")
         normalizeDiscounts(discounts)
     }
 
@@ -435,6 +571,7 @@ object RetailRuleEngine extends App {
      * into a single actionable function, making it easy to apply complex pricing models to sales data.
      *
      * @param trx The transaction to process with discount rules.
+     * @param writer A Print Writer object to be used to write log entries.
      * @return A `ProcessedTransaction` that includes the original transaction details along with the calculated discount
      *         and the final price after discount.
      * @example To process a transaction with all applicable rules:
@@ -443,10 +580,12 @@ object RetailRuleEngine extends App {
      *          val processedTransaction = processTransaction(transaction)
      *           }}}
      */
-    private def processTransaction(trx: Transaction): ProcessedTransaction = {
+    private def processTransaction(trx: Transaction, writer: PrintWriter): ProcessedTransaction = {
+        writeLog(writer, f"Calculating the discount for ${trx.timestamp}", "Info")
         // Calculate the discount for the transaction
-        val discount: Double = calcDiscount(trx)
+        val discount: Double = calcDiscount(trx, writer)
         // Calculate its final price
+        writeLog(writer, f"Calculating total due for ${trx.timestamp}", "Info")
         val finalPrice: Double = trx.unitPrice * trx.quantity * (1 - discount)
         // Return the processed transaction
         ProcessedTransaction(trx, discount, finalPrice)
@@ -469,32 +608,50 @@ object RetailRuleEngine extends App {
      * @see processTransaction
      */
     private def operate(): Unit = {
+        // Open log file
+        val f: File = new File("src/main/resources/rules_engine_logs.txt")
+        // create a print writer object => It will be used across the methods to write log lines
+        val writer: PrintWriter = new PrintWriter(new FileOutputStream(f, true))
+
+        writeLog(writer, "Rule Engine Started.", "Info")
         // Read the data from the CSV File
+        writeLog(writer, "Opening the transactions file ...", "Info")
         val response: (List[String], Int) = readData("src/main/Resources/TRX1000.csv")
         val lines: List[String] = response._1
         val statusCode: Int = response._2
         // In case of an empty file
-        if (statusCode == 0)  println("Empty File")
+        if (statusCode == 0)  writeLog(writer, "You are trying to process un empty file!", "Warning")
         // In case of a Non Existing File
         else if (statusCode == -1)
-            println("Error: Invalid File Path!")
+            writeLog(writer, "There no such file in the specified path!", "Error")
         // In case of an Input Output Error
         else if (statusCode == -2)
-            println("Error: I/O Error Happened Reading the file!")
+            writeLog(writer, "An I/O Error Happened trying to read the file!", "Error")
         else {
-            println(statusCode)
+            writeLog(writer, f"$statusCode lines read successfully!", "Info")
             // Process each line (transaction) in the file.
             // filter(_.timestamp.equals("-1")) => A timestamp of -1 represents an invalid transaction!
             val results: List[ProcessedTransaction] = lines.map(toTrx).
                                                             filterNot(_.timestamp.equals("-1")).
-                                                            map(processTransaction)
+                                                            map(x => processTransaction(x, writer))
             // Write the processed transactions to the database
-            val status: Int = writeData(results)
-            // Status code 1 representing a successful operation
-            if (status == 1) println("Success")
-            else println("Error Writing output to the Database!")
+            val status: Int = writeData(results, writer)
+            status match {
+                // Status code 1 representing a successful operation
+                case 1 => writeLog(writer, "Data successfully inserted into the Database!", "Info")
+                case -1 => writeLog(writer, "An error happened trying to connect to the database" +
+                    ", check your credentials and try again!", "Error")
+                case -2 => writeLog(writer, "A TimeOut Error happened trying to connect to the database!" +
+                    ", Check that the database server is up and running!", "Error")
+                case -3 => writeLog(writer, "An error happened trying to locate the jar file for JDBC Class!", "Error")
+                case _ => writeLog(writer, "Unexpected error happened trying to write the data to the database!", "Error")
+            }
+
         }
+        writeLog(writer, "Rule Engine Finished.", "Info")
+        // Close the log file upon completing.
+        writer.close()
     }
-    // Start processing data
+    // Start processing data.
     operate()
 }
